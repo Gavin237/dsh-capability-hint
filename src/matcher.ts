@@ -24,11 +24,12 @@ export function matchCapabilities(
 
   const out: Match[] = []
   const seen = new Set<string>()
+  const exclude = opts.exclude ?? new Set<string>()
 
-  for (const rule of rules) {
+  for (const rule of rules ?? []) {
     if (out.length >= opts.max) break
     if (!rule?.skill || seen.has(rule.skill)) continue
-    if (opts.exclude.has(rule.skill)) continue
+    if (exclude.has(rule.skill)) continue
 
     for (const trigger of rule.triggers ?? []) {
       if (!trigger) continue
