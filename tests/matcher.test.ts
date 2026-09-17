@@ -64,4 +64,22 @@ describe('matchCapabilities', () => {
   it('ignores a rule with an empty trigger list', () => {
     expect(matchCapabilities(['anything'], [{ skill: 'a', triggers: [] }], opts)).toEqual([])
   })
+
+  describe('non-finite max', () => {
+    const many: Rule[] = [
+      { skill: 'a', triggers: ['x'] },
+      { skill: 'b', triggers: ['x'] },
+      { skill: 'c', triggers: ['x'] },
+    ]
+
+    // 归一化选择的是"夹到关闭"：非有限 max 不可能是调用方有意配置的边界，
+    // 因此按 0 处理（不出提示），而不是回退到一个猜出来的默认上限。
+    it.each([NaN, Infinity, -Infinity])('treats %s as no matches at all', (max) => {
+      expect(matchCapabilities(['x'], many, { max, exclude: new Set() })).toEqual([])
+    })
+
+    it('still truncates normally for a finite fractional max', () => {
+      expect(matchCapabilities(['x'], many, { max: 1.9, exclude: new Set() })).toHaveLength(1)
+    })
+  })
 })
