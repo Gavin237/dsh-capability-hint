@@ -1,0 +1,5 @@
+# pnpm 11 reads build-script approval here (package.json#pnpm is no longer read).
+# esbuild arrives as a transitive dependency; its postinstall is allowed so
+# `pnpm install` does not exit non-zero on the ignored-builds check.
+allowBuilds:
+  esbuild: true

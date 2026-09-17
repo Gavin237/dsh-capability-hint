@@ -1,0 +1,4 @@
+# dsh-capability-hint bundle layer: register the plugin as a bundle row.
+- insert:
+    - id: dsh-capability-hint
+      name: dsh-capability-hint
