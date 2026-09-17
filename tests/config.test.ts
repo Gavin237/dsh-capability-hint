@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import type Schema from '@deepseek-ai/schemastery'
+import Schema from '@deepseek-ai/schemastery'
 import { Config } from '../src/config'
 import type { Config as ConfigShape } from '../src/config'
 
@@ -36,7 +36,24 @@ describe('Config schema', () => {
   })
 
   it('rejects a wrong type loudly', () => {
-    expect(() => ConfigInput({ enabled: 'yes' } as never)).toThrow()
+    // Pin *what* is thrown, not merely *that* something is. A bare `.toThrow()`
+    // also passes for an unrelated `TypeError` from a schema-usage bug, which
+    // would silently turn "validation works" into "the schema is broken".
+    // The spec requires illegal values to fail loudly, so assert both the
+    // validation error type and the offending key in the message.
+    expect(() => ConfigInput({ enabled: 'yes' } as never)).toThrow(Schema.ValidationError)
+    expect(() => ConfigInput({ enabled: 'yes' } as never)).toThrow(/expected boolean/i)
+    // ...and that the error actually names the key that was wrong.
+    expect(() => ConfigInput({ enabled: 'yes' } as never)).toThrow(/enabled/i)
+  })
+
+  it('still accepts a valid value, so the rejection above is not vacuous', () => {
+    // Guards the guard: if `enabled` were rejected unconditionally (or the
+    // schema threw for every input), the test above would pass while proving
+    // nothing. A legal boolean must be accepted.
+    expect(ConfigInput({ enabled: true }).enabled).toBe(true)
+    expect(ConfigInput({ enabled: false }).enabled).toBe(false)
+    expect(() => ConfigInput({ enabled: true })).not.toThrow()
   })
 
   it('returns a fresh array default per call so callers cannot share state', () => {

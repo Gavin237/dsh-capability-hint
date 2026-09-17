@@ -1,5 +1,9 @@
-# pnpm 11 reads build-script approval here (package.json#pnpm is no longer read).
-# esbuild arrives as a transitive dependency; its postinstall is allowed so
-# `pnpm install` does not exit non-zero on the ignored-builds check.
+# pnpm 11 build-script approval (the `pnpm` field in package.json is no longer read).
+# `allowBuilds` is pnpm 11's replacement for the pnpm 10 `onlyBuiltDependencies`;
+# the legacy key was REMOVED in v11 and is silently ignored, so it would leave
+# `pnpm install` exiting 1 with ERR_PNPM_IGNORED_BUILDS.
+# Map shape is <package name>: <boolean> — `true` allowlists the package to run
+# its install scripts, `false` explicitly denies it. esbuild arrives as a
+# transitive dependency; allowing its postinstall keeps `pnpm install` at exit 0.
 allowBuilds:
   esbuild: true
