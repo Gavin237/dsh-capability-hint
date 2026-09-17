@@ -38,6 +38,18 @@ describe('validateRules', () => {
     expect(errs).toHaveLength(1)
     expect(errs[0]).toContain('excluded')
   })
+
+  it('rejects an empty-string trigger', () => {
+    const errs = validateRules([{ skill: 'brainstorming', triggers: [''] }], known, new Set())
+    expect(errs).toHaveLength(1)
+    expect(errs[0]).toContain('empty trigger')
+  })
+
+  it('rejects a trigger that is not lowercase', () => {
+    const errs = validateRules([{ skill: 'brainstorming', triggers: ['Design'] }], known, new Set())
+    expect(errs).toHaveLength(1)
+    expect(errs[0]).toContain('not lowercase')
+  })
 })
 
 describe('BUILTIN_RULES', () => {

@@ -61,6 +61,10 @@ export function validateRules(rules: Rule[], knownSkills: Set<string>, excludes:
       errors.push(`rule "${r.skill}" is excluded by config`)
     }
     for (const t of r.triggers ?? []) {
+      if (t.length === 0) {
+        errors.push(`rule "${r.skill}" has an empty trigger`)
+        continue
+      }
       if (t !== t.toLowerCase()) {
         errors.push(`rule "${r.skill}" trigger "${t}" is not lowercase`)
       }
