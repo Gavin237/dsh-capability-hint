@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
+import { createUserMessage } from '@deepseek-ai/dsh-llm/message'
 import { Config } from './config'
 import type { Config as ConfigShape } from './config'
 import { BUILTIN_RULES } from './rules'
@@ -144,10 +145,7 @@ export function apply(ctx: Context, config: ConfigShape): Ledger {
           if (line) {
             lastTurn = payload.turn ?? NO_TURN
             ledger.recordApplicable(matches, payload.turn ?? NO_TURN, Date.now())
-            // `as never` 未被移除 —— 见 createHintMessage 的文档注释：
-            // 构造合规 `UserMessage` 需要 `@deepseek-ai/dsh-llm`（非本包声明依赖）。
-            // 归属 Task 8；此处保留断言是有意为之，不是遗漏。
-            payload.agent.inject(createHintMessage(line) as never)
+            payload.agent.inject(createHintMessage(line))
           }
         }
       } catch {
@@ -166,37 +164,30 @@ export function apply(ctx: Context, config: ConfigShape): Ledger {
 /**
  * 构造注入用的消息体。
  *
- * **未解决的类型盲点（如实声明，不是已解决项）**：官方工厂 `createUserMessage`
- * 与让它合规所需的 `MessageId()` 都来自 `@deepseek-ai/dsh-llm`，而该包**不是本包
- * 的声明依赖**。实测探针（构造 import 后跑 `pnpm typecheck`）：
- *   - `import { createUserMessage } from '@deepseek-ai/dsh-llm/message'`
- *     → `TS2307: Cannot find module '@deepseek-ai/dsh-llm/message'`
- *   - `import type { UserMessage } from '@deepseek-ai/dsh-agent'`
- *     → `TS2614: Module '...' has no exported member 'UserMessage'`
- * `@deepseek-ai/dsh-session` 同样不可解析。`@deepseek-ai/dsh-agent` 只在
- * `runtime-types.d.ts:132` 用 `UserMessage` 标注 `inject`，并不转发该类型。
+ * **类型盲点已关闭（Task 8）**：官方工厂 `createUserMessage` 来自
+ * `@deepseek-ai/dsh-llm/message`，该包原**不是**本包的声明依赖，因此 Task 5 只能
+ * 在调用点用 `as never` 抹掉检查。Task 8 把它加进 `devDependencies` +
+ * `peerDependencies` 后，断言已删除，此处返回真正的 `UserMessage`。
  *
- * 因此本任务**无法**在不动依赖面的前提下构造类型正确的 `UserMessage`——
- * 那需要把 `@deepseek-ai/dsh-llm` 加进 `package.json` 并重装，属于 Task 1 定下的
- * 包契约变更，超出 Task 6「只加台账」的范围。
+ * 关闭前的实测探针（保留作为回归依据）：
+ *   - 未声明依赖时 `import ... from '@deepseek-ai/dsh-llm/message'`
+ *     → `TS2307: Cannot find module`（Task 8 复现，隐藏 link 后仍为 TS2307）。
+ *   - 声明依赖、但仍返回旧的 `{content: string, source}` 形状
+ *     → `TS2345: Argument of type '{ content: string; ... }' is not assignable to
+ *        parameter of type 'UserMessage'` —— 证明 `inject` 确实要求完整消息，
+ *        断言不是"多余的防御"，而是在掩盖两个真实的缺字段。
  *
- * **归属：Task 8（持久化/依赖收口）**引入 `dsh-llm` 后，以
- * `createUserMessage({ role:'user', content:[{type:'text',text:line}], source:{kind:'plugin',plugin:name} })`
- * 替换本函数，并删除 `apply()` 里对应的 `as never`。
+ * 旧形状在**运行时**也是残的：缺 `id` 与 `role`。`createUserMessage` 补上
+ * `role: 'user'` 与 `id: MessageId(crypto.randomUUID())`，并 `deepFreeze` 后返回。
  *
- * 注意：`id` 目前缺失，即注入消息在**运行时**并不满足 `UserMessage` 的完整性要求；
- * 这一点被调用点的断言掩盖，尚未验证（见报告「已知风险」）。
- *
- * `content` 保持**字符串**形式（与 Task 5 已交付、且被 integration.test.ts 覆盖的
- * 行为一致）。官方 `UserMessage.content` 是 `ContentBlock[]`，改成块数组属于
- * 未被本任务验证的行为变更，故不做。
+ * `source.form: 'notice'` 是有意选择：注入的是一行「这里 X 适用」的一次性提示，
+ * 既不是 `snapshot`（不会被后续快照取代），也不是 `catalog`/`instructions`，
+ * 正是 `ContextForm` 里 `notice` 的语义（"a one-off account of something that
+ * just happened; it supersedes nothing"）。`summary` 同取该行，供折叠行显示。
  */
-export function createHintMessage(line: string): {
-  content: string
-  source: { kind: 'plugin'; plugin: string }
-} {
-  return {
-    content: line,
-    source: { kind: 'plugin', plugin: name },
-  }
+export function createHintMessage(line: string) {
+  return createUserMessage({
+    content: [{ type: 'text', text: line }],
+    source: { kind: 'plugin', plugin: name, form: 'notice', summary: line },
+  })
 }
