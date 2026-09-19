@@ -20,6 +20,12 @@ export { Config }
 export { appendEntry, observeToolCall, recordApplicable }
 export type { LedgerEntry }
 
+// 同理转发 `rate.ts`：`defaultInvocationRate` 是 spec §3 的**唯一成功指标**，
+// 而 tarball 只发 `lib/` + `cordis.patch.yml`，深路径 `.../src/rate` 在安装后
+// 不可达 —— 不转发的话 README 的停用判据就没有入口可调。
+export { defaultInvocationRate } from './rate'
+export type { RateReport } from './rate'
+
 /**
  * 从一条 user 消息里取纯文本。
  *
@@ -61,7 +67,7 @@ export interface Ledger {
   recordInvoked(skill: string, turn: number, now: number): void
 }
 
-/** 建立一个实例级台账。纯内存：持久化（`ctx.storage`）推迟到 Task 8 之后再定。 */
+/** 建立一个实例级台账。纯内存：持久化（`ctx.storage`）到目前为止仍是未做的决定，不在本插件内。 */
 export function createLedger(): Ledger {
   let entries: LedgerEntry[] = []
   return {
