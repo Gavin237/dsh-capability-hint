@@ -46,8 +46,14 @@ export function extractText(message: unknown): string {
 
 /** 一份活的、实例作用域的台账（`apply` 的局部状态，绝不放到模块级）。 */
 export interface Ledger {
-  /** 当前全部记录（只读快照语义：每次读取返回当时的数组）。 */
-  entries(): LedgerEntry[]
+  /**
+   * 当前全部记录的**只读快照**：每次读取返回当时的数组。
+   *
+   * 返回的是副本，且类型为 `readonly LedgerEntry[]` —— 调用方既在编译期无法
+   * `push`/`sort`，在运行期改到的也只是副本，**不可能**把内部状态或 `seq`
+   * （由 `entries.length` 推导，`src/ledger.ts:22`）改坏。
+   */
+  entries(): readonly LedgerEntry[]
   /** 记一条 `applicable`（`turn`/`now` 由调用方给出）。 */
   recordApplicable(matches: Parameters<typeof recordApplicable>[1], turn: number, now: number): void
   /** 记一条 `invoked`（`now` 由调用方给出）。 */
@@ -58,7 +64,9 @@ export interface Ledger {
 export function createLedger(): Ledger {
   let entries: LedgerEntry[] = []
   return {
-    entries: () => entries,
+    // 逐个复制（不是 `entries.slice()` 的等价省略）：`entries` 是 append-only 的，
+    // 复制一份既兑现「快照语义」，也把内部数组与调用方彻底隔离开。
+    entries: () => [...entries],
     recordApplicable(matches, turn, now) {
       entries = recordApplicable(entries, matches, turn, now)
     },

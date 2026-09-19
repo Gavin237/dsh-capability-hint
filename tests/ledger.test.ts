@@ -3,6 +3,7 @@ import type { Context, Events } from '@deepseek-ai/cordis'
 import type { PreStepDecision } from '@deepseek-ai/dsh-agent'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { appendEntry, observeToolCall, recordApplicable } from '../src/ledger'
+import type { LedgerEntry } from '../src/ledger'
 import { apply } from '../src/index'
 import { Config } from '../src/config'
 
@@ -249,6 +250,54 @@ describe('ledger wiring', () => {
     expect(a.ledger.entries()).toHaveLength(1)
     expect(b.ledger.entries()).toHaveLength(0)
     expect(a.ledger.entries()).not.toBe(b.ledger.entries())
+  })
+
+  // -------------------------------------------------------------------------
+  // Finding 2：`entries()` 文档承诺「只读快照语义」，实现却把内部数组交了出去。
+  // 下面这条测试把承诺钉住 —— 调用方改到的只能是副本，内部状态与 `seq`
+  // 都不会被带偏。改成 `entries: () => entries`（泄漏内部引用）时它必须失败。
+  // -------------------------------------------------------------------------
+  it('returns a snapshot: a caller mutating it cannot corrupt internal state or seq', () => {
+    const { ledger, result } = mount()
+    emitResult(result, 'skill', { name: 'brainstorming' })
+
+    const snapshot = ledger.entries() as LedgerEntry[]
+    expect(snapshot).toHaveLength(1)
+
+    // 恶意/误用的调用方：清空、倒序、并塞入伪造记录。
+    snapshot.length = 0
+    snapshot.push(
+      { seq: 999, time: 0, kind: 'invoked', skill: 'forged', turn: 999 },
+      { seq: 998, time: 0, kind: 'invoked', skill: 'forged', turn: 998 },
+    )
+    snapshot.sort((a, b) => b.seq - a.seq)
+
+    // 内部状态未被污染。
+    expect(ledger.entries()).toEqual([
+      { seq: 1, time: expect.any(Number), kind: 'invoked', skill: 'brainstorming', turn: 0 },
+    ])
+
+    // 每次读取都是**不同的**副本（快照语义），且内容一致。
+    expect(ledger.entries()).not.toBe(ledger.entries())
+    expect(ledger.entries()).toEqual(ledger.entries())
+
+    // `seq` 仍由**内部** entries.length 推导：下一条必须是 2，不是 4、不是 1000。
+    emitResult(result, 'skill', { name: 'test-driven-development' })
+    const after = ledger.entries()
+    expect(after.map((e) => e.seq)).toEqual([1, 2])
+    expect(after.map((e) => e.skill)).toEqual(['brainstorming', 'test-driven-development'])
+  })
+
+  it('hands out a fresh array per call, so a stale snapshot cannot be written through', () => {
+    const { ledger, result } = mount()
+    const stale = ledger.entries() as LedgerEntry[]
+    expect(stale).toHaveLength(0)
+
+    emitResult(result, 'skill', { name: 'brainstorming' })
+
+    // 旧快照保持在取用时的状态（它是副本，不是内部数组的别名）。
+    expect(stale).toHaveLength(0)
+    expect(ledger.entries()).toHaveLength(1)
   })
 
   it('runs the seq monotonically across both kinds', async () => {
