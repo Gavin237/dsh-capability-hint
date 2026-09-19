@@ -117,6 +117,7 @@ type ResultListener = Events[typeof TOOLS_RESULT]
  */
 function makeCtx() {
   const listeners = new Map<string, unknown>()
+  const provided = new Map<string, unknown>()
   const tools = { register: vi.fn() }
   // `on` 用方法简写 + 泛型参数：事件名仍是 `keyof Events`（写错即编译失败），
   // 监听器按该事件**真实的**签名校验 —— 与 integration.test.ts 的做法一致。
@@ -125,13 +126,18 @@ function makeCtx() {
     listeners.set(name, fn)
     return () => listeners.delete(name)
   }
-  const ctx = { on, tools, skills: { list: async () => [] } }
-  return { ctx, listeners, tools }
+  // I2：`apply()` 把台账注册为 ctx 服务；假 Context 一并提供。
+  const provide = (name: string, value?: unknown) => {
+    provided.set(name, value)
+    return () => provided.delete(name)
+  }
+  const ctx = { on, provide, tools, skills: { list: async () => [] } }
+  return { ctx, listeners, tools, provided }
 }
 
 function mount(config?: Record<string, unknown>) {
-  const { ctx, listeners, tools } = makeCtx()
-  // 桥接一次：只有 `on()`/`tools`/`skills` 的假 Context → 真实的 `Context`。
+  const { ctx, listeners, tools, provided } = makeCtx()
+  // 桥接一次：只有 `on()`/`provide()`/`tools`/`skills` 的假 Context → 真实的 `Context`。
   // `ctx.on` 本身不接受任意 string，所以这层桥接不会掩盖事件名写错。
   const cfg = Config as unknown as (i?: Record<string, unknown>) => Parameters<typeof apply>[1]
   const ledger = apply(ctx as unknown as Context, cfg(config))
@@ -140,7 +146,7 @@ function mount(config?: Record<string, unknown>) {
   const result = listeners.get(TOOLS_RESULT) as ResultListener | undefined
   if (!preStep) throw new Error(`no listener registered for ${PRE_STEP}`)
   if (!result) throw new Error(`no listener registered for ${TOOLS_RESULT}`)
-  return { preStep, result, tools, listeners, ledger }
+  return { preStep, result, tools, listeners, ledger, provided }
 }
 
 type PreStepPayload = {
@@ -213,12 +219,14 @@ describe('ledger wiring', () => {
   })
   it('records applicable entries when a hint is injected', async () => {
     const { ledger, preStep } = mount()
-    const next = vi.fn(async (): Promise<PreStepDecision> => ({ kind: 'reject' }))
-    const { injected, payload } = makePayload(['帮我做个设计方案'], 4)
+    const enter = { kind: 'enter', messages: [] } as unknown as PreStepDecision
+    const next = vi.fn(async (): Promise<PreStepDecision> => enter)
+    const { payload } = makePayload(['帮我做个设计方案'], 4)
 
-    await invokePreStep(preStep, payload, next)
+    const decision = await invokePreStep(preStep, payload, next)
 
-    expect(injected).toHaveLength(1)
+    // C1 之后提示走 enter 决策的 messages 通道。
+    expect(decision.kind).toBe('enter')
     const entries = ledger.entries()
     expect(entries.length).toBeGreaterThan(0)
     for (const e of entries) {
@@ -230,7 +238,8 @@ describe('ledger wiring', () => {
 
   it('records nothing when no hint is injected', async () => {
     const { ledger, preStep } = mount()
-    const next = vi.fn(async (): Promise<PreStepDecision> => ({ kind: 'reject' }))
+    const enter = { kind: 'enter', messages: [] } as unknown as PreStepDecision
+    const next = vi.fn(async (): Promise<PreStepDecision> => enter)
     await invokePreStep(preStep, makePayload(['今天天气不错'], 1).payload, next)
     await invokePreStep(preStep, makePayload([], 2).payload, next)
     await invokePreStep(preStep, makePayload(['帮我做个设计方案'], 3).payload, next)
@@ -240,6 +249,20 @@ describe('ledger wiring', () => {
     const { ledger: off, preStep: offPreStep } = mount({ enabled: false })
     await invokePreStep(offPreStep, makePayload(['帮我做个设计方案'], 1).payload, next)
     expect(off.entries()).toHaveLength(0)
+  })
+
+  it('exposes the same ledger through the ctx service (I2: a reachable path)', () => {
+    // I2：`apply()` 的返回值只有直接调用者拿得到；运行中的 harness 通过
+    // ctx 服务名读取同一份台账。两条路径必须是**同一个对象**，否则
+    // `defaultInvocationRate(ctx['dsh-capability-hint'].entries())` 会读到空。
+    const { provided, ledger, result } = mount()
+    const viaCtx = provided.get('dsh-capability-hint')
+    expect(viaCtx).toBe(ledger)
+
+    emitResult(result, 'skill', { name: 'brainstorming' })
+    const fromCtx = (viaCtx as typeof ledger).entries()
+    expect(fromCtx).toHaveLength(1)
+    expect(fromCtx[0].skill).toBe('brainstorming')
   })
 
   it('is instance-scoped: a second apply() does not see the first ledger', () => {

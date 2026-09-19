@@ -1,6 +1,7 @@
 # dsh-capability-hint
 
-在 `agent/pre-step` 注入一行「本轮可能适用：X」的能力提示，让**已安装但想不起来用**的方法论技能真正被调用。
+在每轮第一步（`agent/pre-step`，`step === 1`）注入一行「本轮可能适用：X」的能力提示，
+让**已安装但想不起来用**的方法论技能真正被调用。
 
 ## 这是什么
 
@@ -8,7 +9,8 @@
 「通用方法论」层（`brainstorming`、`systematic-debugging`、`writing-plans`…）没有硬需求
 驱动，于是**装了等于没装**。
 
-本插件在每轮开头（`payload.messages` 非空时）按规则表匹配当前轮次文本，命中就注入一行：
+本插件在每轮**第一步**按规则表匹配当前轮次文本，命中就把一行提示**追加到本步的
+`enter` 决策消息末尾**：
 
 ```
 [能力提示] 本轮可能适用：brainstorming, writing-plans
@@ -19,21 +21,32 @@
 
 ## 它**不**做什么
 
-这三条是设计红线，不是"暂未实现"：
-
 | 不做 | 说明 |
 |---|---|
 | **不替换技能目录** | 不重写 `tool-skill`、不改目录渲染、不删任何技能。目录瘦身交给官方配置（`catalogDescriptionMaxLength`），不写代码。 |
-| **不改决策** | 注入是**叠加**（`agent.inject()`），不是拦截。监听器**必调 `next()` 并原样透传**下游决策，绝不短路、绝不改写 `PreStepDecision`。 |
-| **不调 LLM** | 全流程零模型调用。匹配是纯字符串子串比对（`matchCapabilities`），渲染是纯函数（`renderHint`）。不判断"这个能力好不好"，只判断"这个词出现过没有"。 |
+| **不改决策** | 提示是**追加**，不是拦截：先 `await next()` 拿到下游决策，只在 `kind === 'enter'` 时把一行提示排到 `messages` **末尾**。既有消息一条不丢、不改、不重排。下游返回 `reject` 时**原样透传**，不追加。 |
+| **不调 LLM** | 全流程零模型调用。匹配是纯字符串子串比对（`matchCapabilities`），渲染是纯函数（`renderHint`）。 |
+| **不重复注入** | 只在 `step === 1`（每轮第一次 proposal）匹配；且排除 `source.plugin === name` 的消息，插件永不可能匹配自己的输出。 |
+
+### 为什么走 `PreStepDecision` 而不是 `agent.inject()`
+
+这是对实施计划 Global Constraints「不通过 `PreStepDecision` 改消息」的**显式偏离**，理由如下：
+
+`agent.inject()` 写的是 **`next-step` 收件箱**，而驱动在 `preStep` 里**已经先
+`claim()` 掉了本步批次**、之后才派发 waterfall。官方文档
+（`docs/subsystems/core.md:139-144`）原文即：*"A running driver claims it at the nearest
+later step boundary… **It may miss a request whose pre-step already claimed its batch.**"*
+
+后果是提示**必然晚一步**到达 —— 该用它来选能力的那个模型调用看不到它，插件的前提目的落空。
+能够落进**本步**的唯一机制就是 `enter` 决策的 `messages`。这条约束原本要防的是"干扰
+`tool-skill` 的目录通道"和"操纵步骤决策"，而**追加一行消息既不干扰目录（`tool-skill`
+走的是 `agent.inject()`，另一个通道），也不改变进入/拒绝的决策本身**。
 
 其它明确不做：
 
 - ❌ **不自动淘汰技能**——只出报告供人判断，写入门是龙哥的动作。
-- ❌ **不写 MEMORY.md / 技能库**——纯内存台账，无持久化。
-- ❌ **不主动引入新能力**——第一版纯减法，只提高现有能力的召回。
+- ❌ **不写 MEMORY.md / 技能库**——纯内存台账，无持久化（见下）。
 - ❌ **不做 `agent/turn-stopping` 强制作废**——第一版只做零成本提示。
-- ❌ **不触碰「任务强制必需」与「业务专用」两层**——只对「通用方法论」层做主动召回。
 - ❌ **不追求覆盖全部能力**——先覆盖 20–30 个高频的。
 
 ## 配置项
@@ -100,10 +113,52 @@ dsh-capability-hint:
 
 **只有 `rate === 0` 可以安全解读为"从未被调用"。** 更高的值不可当作"按轮次命中率"。
 
-另有一个**已知盲区**：`invoked` 分子尚无真实 harness 会话的端到端验证——`observeToolCall`
-按 `toolName === 'skill'` 加 `args.name` 识别调用，该形状是读源码核实的，不是跑出来的。
-若真实运行中 skill 加载器换了工具名，**分子会系统性为 0，所有技能都读作 `rate = 0`**，
-与"插件完全没起作用"无法区分。看到全 0 报告时，先怀疑这个，再下结论。
+#### 怎么读到这些条目（I2）
+
+`apply()` 的返回值只有**直接调用 `apply` 的人**拿得到，运行中的 harness 不持有它。
+因此台账同时通过 `ctx.provide` 注册为 **ctx 服务名 `dsh-capability-hint`**：
+
+```ts
+const entries = ctx['dsh-capability-hint'].entries()   // readonly LedgerEntry[]
+const report  = defaultInvocationRate([...entries])     // RateReport[]
+```
+
+两条路径指向**同一个对象**、同一个生命周期（`ctx.provide` 在插件卸载时自动注销）。
+服务名常量导出为 `LEDGER_SERVICE`。
+
+#### 一个仍未关闭的盲区：`invoked` 分子
+
+`observeToolCall` 按 `toolName === 'skill'` + `args.name` 识别调用，该形状是**读源码**
+核实的，**不是跑出来的**：`invoked` 分子**没有任何真实 harness 会话的端到端验证**。
+
+已核实的部分：`tools/result` 是真实的 emit 事件（签名 `docs/subsystems/tools.md:714`），
+`exec.arguments` 是注册表已解析并深冻结的对象（`dsh-tools/lib/types/index.d.ts:204-205`），
+工具模型可见名 `skill` 与 `dsh-tool-skill/lib/index.js:60-66` 一致。因此"工具名被加载器
+换掉"这一具体假设**风险较低** —— 它不是主导原因。
+
+真正主导的原因是**时机与分母**（本次已修）：修复前提示晚一步到达，且分母会因每步
+重新自触发而膨胀，导致每一次判定都对应不到任何真实的调用机会。修复之后，剩下的风险
+按可能性排序：
+
+1. **会话内观测窗口太短** —— 4 周观察期的数据被进程重启切成碎片（见下 I3）。
+2. **`lastTurn` 归属** —— `tools/result` 载荷里没有 `turn`，位次只能沿用本实例最近一次
+   `agent/pre-step` 观测到的轮次；跨实例/中途加载时会退化成哨兵 `0`。
+3. **技能确实没被调用** —— 也就是插件真的没起作用。
+
+看到全 0 报告时，先排除第 1、2 条，再下"该退役"的结论。
+
+#### I3：没有持久化，所以 4 周停用条件是**当前不可证伪的**（待裁决）
+
+spec 把台账映射到 `ctx.storage`，并要求跨**周**聚合（上表的停用条件是 4 周观察窗）。
+本次**有意不实现持久化**，后果必须说清楚：
+
+- 台账是**进程内**的。harness 重启 = 分母归零，历史一并消失。
+- 因此 **"4 周观察期内所有能力默认调用率均无上升"这条停用条件，以当前实现无法判定** ——
+  没有一个能活过重启的分母，你永远只能看到"本次会话"的切片。
+- 这不影响插件本身的可用性（提示照常工作），只影响**退役判据的可执行性**。
+
+这被标记为**需要人裁决的决策**（实现 `ctx.storage` 持久化，还是把观察窗缩短到单次
+会话）。在裁决之前，请只把台账当作会话级诊断，不要据此做退役判断。
 
 ## 开发
 

@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm/message'
+import type { UserMessage } from '@deepseek-ai/dsh-llm/message'
 import { Config } from './config'
 import type { Config as ConfigShape } from './config'
 import { BUILTIN_RULES } from './rules'
@@ -83,12 +84,34 @@ export function createLedger(): Ledger {
   }
 }
 
+/**
+ * 暴露给 `ctx` 的服务名。
+ *
+ * I2：`apply()` 的返回值只有**直接调用 `apply` 的人**拿得到，运行中的 harness
+ * 不持有它，于是台账被封在 `apply()` 的闭包里 —— `defaultInvocationRate` 导出了
+ * 却没有可达的 entries 可喂。把同一份台账再 `ctx.provide` 一次，就让
+ * `ctx['dsh-capability-hint'].entries()` 成为**运行期可达**的读取路径，
+ * 同时不影响已有的返回值契约（同一个对象，两条路）。
+ */
+export const LEDGER_SERVICE = 'dsh-capability-hint' as const
+
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    /** 本插件提供的实例级台账（只读快照语义）。 */
+    'dsh-capability-hint': Ledger
+  }
+}
+
 export function apply(ctx: Context, config: ConfigShape): Ledger {
   const exclude = new Set(config.excludeSkills ?? [])
 
   // 实例级台账：每次 `apply()` 一份新状态。绝不用模块级 `let` ——
   // 那会跨 Agent 实例泄漏记录，并在插件重载后残留旧数据。
   const ledger = createLedger()
+
+  // I2：把台账注册为 ctx 服务。`ctx.provide` 在插件卸载时自动注销，
+  // 因此它与 `apply` 的返回句柄共享同一个生命周期与同一份状态。
+  ctx.provide(LEDGER_SERVICE, ledger)
 
   // 最近一次已知的轮次。`tools/result` 的载荷里**没有** `turn` 字段
   // （签名 `(exec, result)`，`docs/subsystems/tools.md:714`），因此 invoked 记录
@@ -129,37 +152,71 @@ export function apply(ctx: Context, config: ConfigShape): Ledger {
   })
 
   // 注册即 effect：ctx.on 返回 disposer，插件卸载时自动清理。
-  // prepend: true 让我们先于下游观察步骤，但**仍然调用 next()**，
-  // 由下游决定消息内容（waterfall 契约）。
+  //
+  // **通道裁决（C1，显式偏离计划 Global Constraints "不通过 PreStepDecision 改消息"）**：
+  // `agent.inject()` 走的是 **next-step** 收件箱（`inject(input) { this.send(input, "next-step", false) }`），
+  // 而驱动在 `preStep` 里**已经先 `claim()` 掉了本步批次**，之后才派发 waterfall
+  // （官方文档 `docs/subsystems/core.md:139-144` 原文："It may miss a request whose
+  // pre-step already claimed its batch."）。因此 inject 出来的提示**必然晚一步**到达：
+  // 该用它来选能力的那个模型调用看不到它 —— 插件的前提目的落空。
+  // 唯一能落进**本步**的机制就是 `enter` 决策的 `messages`。
+  //
+  // 这不是替换决策，而是**组合**：先 `await next()` 拿到下游决策，只在
+  // `kind === 'enter'` 时把提示追加到 `messages` 末尾；`reject` 与"无提示"
+  // 一律**原样透传**（连数组引用都不换）。既有消息一条不丢、不改、不重排。
+  //
+  // 刻意**不再**调用 `agent.inject()`：那条通道既然必然晚一步，留着只会让
+  // "提示到底进没进本步"这件事同时有两种答案。每轮只走一条通道。
   ctx.on(
     'agent/pre-step',
     async (
-      payload: { agent: Agent; messages: unknown[]; turn: number; step: number; signal: AbortSignal },
+      payload: { agent: Agent; messages: UserMessage[]; turn: number; step: number; signal: AbortSignal },
       next: () => Promise<PreStepDecision>,
     ): Promise<PreStepDecision> => {
-      // fail-open：任何异常都不得影响正常对话（Global Constraints）。
+      // 先取下游决策：无论我们是否追加提示，下游都必须被调用一次且只被调用一次。
+      const decision = await next()
+
+      let hint: UserMessage | null = null
       try {
-        // 只有带 user 消息的批次才是"每轮首次 proposal"；
-        // 工具续步可能提交空批次，必须跳过（spec §12.6）。
-        if (config.enabled && Array.isArray(payload?.messages) && payload.messages.length > 0) {
-          const texts = payload.messages.map(extractText).filter(Boolean)
-          const matches = matchCapabilities(texts, BUILTIN_RULES, {
-            max: config.maxHintsPerTurn,
-            exclude,
-          })
-          const line = renderHint(matches, config.hintPrefix)
-          if (line) {
-            lastTurn = payload.turn ?? NO_TURN
-            ledger.recordApplicable(matches, payload.turn ?? NO_TURN, Date.now())
-            payload.agent.inject(createHintMessage(line))
+        // M3：`lastTurn` 每轮都更新，而不是只在注入了提示时才更新 ——
+        // 否则"本轮无命中"之后紧接着的技能调用会被归到上一轮。
+        if (config.enabled && typeof payload?.turn === 'number') {
+          lastTurn = payload.turn
+        }
+
+        if (config.enabled && payload?.step === 1 && Array.isArray(payload.messages)) {
+          // C1 防御纵深（两层，独立于通道选择）：
+          //   ① `step === 1` 是"每轮第一次 proposal"的**真**判据，且免疫收件箱自喂
+          //      （自喂的消息总是出现在后续 step）。工具续步的批次由驱动在
+          //      `messages.length === 0` 时提交（spec §12.6），两道闸门互补。
+          //   ② 排除 `source.plugin === name` 的消息：插件永不可能匹配自己的输出。
+          const texts = payload.messages
+            .filter((m) => !isOwnMessage(m))
+            .map(extractText)
+            .filter(Boolean)
+
+          if (texts.length > 0) {
+            const matches = matchCapabilities(texts, BUILTIN_RULES, {
+              max: config.maxHintsPerTurn,
+              exclude,
+            })
+            const line = renderHint(matches, config.hintPrefix)
+            if (line) {
+              ledger.recordApplicable(matches, payload.turn ?? NO_TURN, Date.now())
+              hint = createHintMessage(line)
+            }
           }
         }
       } catch {
-        // 静默失败：提示是增强，不是必需。
+        // 静默失败：提示是增强，不是必需。下游决策已经拿到，不受影响。
       }
 
-      // waterfall 契约：原样透传下游决策，绝不短路。
-      return next()
+      // 只在**已进入**的步骤上追加；`reject` 与"无提示"一律原样返回。
+      // 既有消息一条不丢、不改、不重排 —— 提示永远排在末尾。
+      if (hint && decision.kind === 'enter') {
+        return { kind: 'enter', messages: [...decision.messages, hint] }
+      }
+      return decision
     },
     { prepend: true },
   )
@@ -168,23 +225,29 @@ export function apply(ctx: Context, config: ConfigShape): Ledger {
 }
 
 /**
+ * 这条消息是不是本插件自己产出的。
+ *
+ * C1 的第二道闸门：即便 `step === 1` 失效（例如未来驱动改了 step 语义），
+ * 插件也不可能靠自己的输出重新触发自己 —— 自喂提示的 `source.plugin`
+ * 恒等于 `name`（见 `createHintMessage`）。
+ */
+function isOwnMessage(message: unknown): boolean {
+  if (!message || typeof message !== 'object') return false
+  const source = (message as { source?: unknown }).source
+  if (!source || typeof source !== 'object') return false
+  return (source as { plugin?: unknown }).plugin === name
+}
+
+/**
  * 构造注入用的消息体。
  *
- * **类型盲点已关闭（Task 8）**：官方工厂 `createUserMessage` 来自
- * `@deepseek-ai/dsh-llm/message`，该包原**不是**本包的声明依赖，因此 Task 5 只能
- * 在调用点用 `as never` 抹掉检查。Task 8 把它加进 `devDependencies` +
- * `peerDependencies` 后，断言已删除，此处返回真正的 `UserMessage`。
+ * 用官方工厂 `createUserMessage`（`@deepseek-ai/dsh-llm/message`），返回真正的
+ * `UserMessage`：补上 `role: 'user'` 与 `id: MessageId(crypto.randomUUID())`，
+ * 并 `deepFreeze` 后返回。
  *
- * 关闭前的实测探针（保留作为回归依据）：
- *   - 未声明依赖时 `import ... from '@deepseek-ai/dsh-llm/message'`
- *     → `TS2307: Cannot find module`（Task 8 复现，隐藏 link 后仍为 TS2307）。
- *   - 声明依赖、但仍返回旧的 `{content: string, source}` 形状
- *     → `TS2345: Argument of type '{ content: string; ... }' is not assignable to
- *        parameter of type 'UserMessage'` —— 证明 `inject` 确实要求完整消息，
- *        断言不是"多余的防御"，而是在掩盖两个真实的缺字段。
- *
- * 旧形状在**运行时**也是残的：缺 `id` 与 `role`。`createUserMessage` 补上
- * `role: 'user'` 与 `id: MessageId(crypto.randomUUID())`，并 `deepFreeze` 后返回。
+ * Task 5 曾因 `@deepseek-ai/dsh-llm` 未声明为依赖而在调用点抹掉类型检查；
+ * Task 8 补上依赖后该断言已删除。**`src/` 全目录现无任何类型断言**
+ * （唯一的 `as const` 是 `LEDGER_SERVICE` 的字面量收窄，不掩盖任何类型信息）。
  *
  * `source.form: 'notice'` 是有意选择：注入的是一行「这里 X 适用」的一次性提示，
  * 既不是 `snapshot`（不会被后续快照取代），也不是 `catalog`/`instructions`，

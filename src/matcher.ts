@@ -24,6 +24,10 @@ export function matchCapabilities(
 
   if (max <= 0 || texts.length === 0) return []
 
+  // 用 `'\n'` 而不是 `''` 或 `' '` 拼接：`\n` 保证两条消息之间**必定**存在一个
+  // 既不在中文触发词里、也不在英文触发词里的字符，从而不会把两条消息的边界
+  // 合成出一个原文中不存在的触发词（例如 "a" + "sk" 合成 "ask"，
+  // 或 "设" + "计" 分处两条消息却合成 "设计"）。
   const hay = texts.join('\n').toLowerCase()
   if (!hay) return []
 
