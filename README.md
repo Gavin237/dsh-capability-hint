@@ -30,7 +30,10 @@
 
 ### 为什么走 `PreStepDecision` 而不是 `agent.inject()`
 
-这是对实施计划 Global Constraints「不通过 `PreStepDecision` 改消息」的**显式偏离**，理由如下：
+> 注：本节最初把这条选择写成"对实施计划 Global Constraints 的显式偏离"。**该表述过严**——
+> spec 明确把 `返回 {kind:'enter', messages:[...原消息, 提示]}` 列为**已验证能力**（§12.6）。
+> 它偏离的是**计划里更严的措辞**，不是 spec 的要求。保留本节是因为**推理过程本身有价值**：
+> 为什么另一条通道不够用。
 
 `agent.inject()` 写的是 **`next-step` 收件箱**，而驱动在 `preStep` 里**已经先
 `claim()` 掉了本步批次**、之后才派发 waterfall。官方文档
