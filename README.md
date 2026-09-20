@@ -44,7 +44,7 @@ later step boundary… **It may miss a request whose pre-step already claimed it
 
 其它明确不做：
 
-- ❌ **不自动淘汰技能**——只出报告供人判断，写入门是龙哥的动作。
+- ❌ **不自动淘汰技能**——只出报告供人判断，删除技能始终是人的动作。
 - ❌ **不写 MEMORY.md / 技能库**——纯内存台账，无持久化（见下）。
 - ❌ **不做 `agent/turn-stopping` 强制作废**——第一版只做零成本提示。
 - ❌ **不追求覆盖全部能力**——先覆盖 20–30 个高频的。
