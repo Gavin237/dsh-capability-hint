@@ -1,7 +1,26 @@
 {
   "name": "dsh-capability-hint",
   "version": "0.1.0",
-  "description": "Inject a one-line hint about capabilities that match the current turn.",
+  "description": "DSH plugin: inject a one-line hint naming skills that match the current turn, so installed-but-forgotten methodology skills actually get used. Deterministic matching, no LLM calls, fail-open.",
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "cordis",
+    "agent-skills",
+    "skill-routing",
+    "capability-hint",
+    "context-injection"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Gavin237/dsh-capability-hint.git"
+  },
+  "homepage": "https://github.com/Gavin237/dsh-capability-hint#readme",
+  "bugs": {
+    "url": "https://github.com/Gavin237/dsh-capability-hint/issues"
+  },
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
